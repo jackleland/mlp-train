@@ -29,7 +29,7 @@ from mlptrain.sampling.plumed import (
 from mlptrain.log import logger
 from mlptrain.box import Box
 from mlptrain.utils import work_in_tmp_dir
-
+import time
 
 if TYPE_CHECKING:
     from ase.io.trajectory import TrajectoryWriter
@@ -233,6 +233,8 @@ def run_mlp_md(
     else:
         logger.info('Running MLP MD')
 
+    start_time = time.perf_counter()
+
     decorator = work_in_tmp_dir(
         copied_substrings=copied_substrings_list,
         kept_substrings=kept_substrings_list,
@@ -255,6 +257,17 @@ def run_mlp_md(
         restart_files=restart_files,
         **kwargs,
     )
+
+    delta_time = time.perf_counter() - start_time
+    if delta_time < 60:
+        logger.info(f'MLP MD simulation completed in {delta_time:02.2f} s.')
+    else:
+        hours, remainder = divmod(delta_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        logger.info(
+            f'MLP MD simulation completed in {hours:02d} h {minutes:02d} min {seconds:02d} s.'
+        )
 
     return traj
 
