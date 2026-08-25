@@ -75,7 +75,7 @@ process semantics that CI and Linux HPC do.
 
 The cost is that everything crossing a process boundary has to be picklable,
 and that ``Config`` is rebuilt from the import in each child. Both are made
-concrete in `Writing code that runs in a worker`_.
+concrete in `Important caveats for code that runs in a worker`_.
 
 =====================
 The three timeouts
@@ -162,8 +162,8 @@ file arrives for bias inheritance.
    left running.
 
 Both knobs are plain attributes on the ``Config`` singleton, set at module
-scope so that spawned workers pick them up (see `Important caveats for code that 
-runs in a worker`_)::
+scope so that spawned workers pick them up (see
+`Important caveats for code that runs in a worker`_)::
 
     import mlptrain as mlt
 
@@ -174,23 +174,50 @@ runs in a worker`_)::
 The result protocol
 ======================
 
-Workers never return values; they put a four-tuple on a shared
-``mp.Queue``::
+A spawned worker has no way to hand a return value back to its parent, so
+``_gen_active_config_worker`` puts a four-tuple on a shared ``mp.Queue``
+instead::
 
     (idx, 'ok', configuration_or_None, None)
     (idx, 'error', None, repr(exception))
 
-``_gen_active_config_worker`` catches ``BaseException`` so that a failure
-inside one worker is reported to the parent rather than lost across the
-process boundary.
+``idx`` says which worker the result came from, so the parent can match it to
+the process it started. The worker catches ``BaseException`` before building
+the tuple, so a failure inside one worker reaches the parent as an ``'error'``
+entry rather than disappearing along with the process.
 
-The parent drains the queue **inside** the poll loop, on every iteration, so
-that a child is always able to finish writing and exit. An ``mp.Queue`` is
-backed by an OS pipe with a finite buffer: a child that has written more than
-the buffer holds blocks in its feeder thread until the parent reads. Draining
-on every pass keeps that buffer moving, and keeps the parent clear of the
-classic queue/join deadlock. If you add anything to the poll loop, keep the
-drain unconditional.
+.. admonition:: Why does the parent read the queue on every pass?
+
+  The obvious way to collect results is "wait for the workers to finish, then
+  read what they left on the queue". That order deadlocks, and why it does is
+  the reason the poll loop is shaped the way it is.
+
+  An ``mp.Queue`` is not a shared list. Behind it sits an OS pipe with a
+  fixed-size buffer, and a background *feeder thread* inside the worker that
+  copies queued items into that pipe:
+
+  .. code-block:: text
+
+      worker                                        parent
+
+      queue.put(result) → feeder thread → [ pipe buffer ] → queue.get()
+                                            fixed size
+
+  If nothing is reading the parent's end, that buffer fills up. The feeder
+  thread then blocks part-way through its write, and a process cannot exit while
+  its feeder thread is still trying to flush — so the worker hangs, having
+  already done all of its work, one step short of exiting. A parent sitting in
+  ``worker.join()`` waiting for that exit waits forever, because each side is
+  now waiting on the other. This is the classic multiprocessing queue/join
+  deadlock.
+
+  ``_add_active_configs`` sidesteps it by draining the queue **inside** the poll
+  loop, on every pass, instead of after the workers have been joined. Reading
+  keeps the pipe emptying, the feeder thread never blocks, and each worker exits
+  as soon as its result is safely on the queue.
+
+  If you add anything to the poll loop, keep the drain unconditional — it also
+  has to run on the passes where no worker has finished.
 
 ================================================
 Important caveats for code that runs in a worker
@@ -202,13 +229,34 @@ There is no shared memory and no inherited state: the child re-imports
 ``init_config.copy()``, ``mlp.copy()`` and ``selection_method.copy()``, and
 why backends must keep their calculators constructible from picklable state.
 
-**Set ``Config`` attributes at module scope.** ``Config`` is a module-level
+**Set Config attributes at module scope.** ``Config`` is a module-level
 singleton, and each spawned worker builds its own by re-importing — including
-re-importing the script it was launched from. Assignments written at module
-scope therefore take effect in the worker; assignments inside an
-``if __name__ == '__main__':`` block, or made after the workers have started,
-apply only to the parent. Anything else a worker needs is passed explicitly
-through its arguments.
+re-importing the script it was launched from. That re-import runs everything
+at module scope but skips the ``if __name__ == '__main__':`` block, which is
+exactly the split you want::
+
+    import mlptrain as mlt
+
+    # Module scope: re-executed on import inside every spawned worker,
+    # so these are the values the workers actually run with.
+    mlt.Config.n_cores = 10
+    mlt.Config.orca_keywords = ['PBE', 'def2-SVP', 'EnGrad']
+    mlt.Config.dynamics_timeout = 15 * 60
+
+    if __name__ == '__main__':
+        # Parent only: not re-run by the workers.
+        system = mlt.System(mlt.Molecule('methane.xyz'), box=None)
+        mlp = mlt.potentials.MACE('methane', system=system)
+        mlp.al_train(method_name='orca', temp=1000)
+
+Moving ``mlt.Config.dynamics_timeout = 15 * 60`` inside the ``__main__``
+guard would silently leave every worker on the 2 hour default. The same goes
+for assignments made after ``al_train`` has started its workers: those reach
+the parent only. Anything else a worker needs is passed explicitly through its
+arguments.
+
+``examples/methane.py`` uses this layout — ``Config`` at the top of the file,
+everything else under the guard.
 
 **A lost worker costs configurations, not the iteration.** A worker whose
 trajectory hit ``dynamics_timeout``, that was terminated at
