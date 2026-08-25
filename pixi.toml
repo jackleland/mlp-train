@@ -58,7 +58,9 @@ pytest = "~=8.0"
 pytest-cov = "~=5.0"
 
 [feature.dev.pypi-dependencies]
-ty = "==0.0.28"
+# Keep in sync with the `ty` pin in pyproject.toml's dev dependency-group, so
+# the pixi and conda install paths type-check with the same version.
+ty = "==0.0.69"
 
 # --- docs (was [project.optional-dependencies].docs in pyproject.toml) ---
 [feature.docs.pypi-dependencies]
