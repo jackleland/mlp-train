@@ -1,6 +1,6 @@
-**********************************
-Parallelism and timeouts
-**********************************
+*******************************************
+Parallelism and timeouts in active learning
+*******************************************
 
 Active learning in ``mlp-train`` runs a *nested* tree of processes: the
 active-learning loop starts one worker per requested configuration, each
@@ -162,8 +162,8 @@ file arrives for bias inheritance.
    left running.
 
 Both knobs are plain attributes on the ``Config`` singleton, set at module
-scope so that spawned workers pick them up (see `Writing code that runs in a
-worker`_)::
+scope so that spawned workers pick them up (see `Important caveats for code that 
+runs in a worker`_)::
 
     import mlptrain as mlt
 
@@ -192,9 +192,9 @@ on every pass keeps that buffer moving, and keeps the parent clear of the
 classic queue/join deadlock. If you add anything to the poll loop, keep the
 drain unconditional.
 
-========================================
-Writing code that runs in a worker
-========================================
+================================================
+Important caveats for code that runs in a worker
+================================================
 
 **Everything crossing a process boundary must be picklable under spawn.**
 There is no shared memory and no inherited state: the child re-imports
@@ -218,6 +218,15 @@ iteration continues with the configurations that did arrive and logs how many
 trajectories were lost. Functions along this path return ``Optional`` for that
 reason — ``run_mlp_md``, ``_run_mlp_md``, ``Metadynamics._run_single_metad``
 and ``_gen_active_config`` all may return ``None``, and callers must check.
+
+.. note::
+  As of now the above is only true for active learning. Metadynamics, umbrella 
+  sampling, and τ_acc are not supervised by a parent, so a worker that fails or 
+  is killed will terminate the iteration. Therefore, if you are running 
+  metadynamics, umbrella sampling, or any other use of metadynamics without 
+  active learning, the default ``Config.dynamics_timeout`` is set to 100000 
+  hours, which is effectively infinite for most use cases and therefore should 
+  not interrupt your calculations.
 
 **Bias inheritance tolerates incomplete PLUMED output.** A trajectory that
 diverges before being killed can leave a ``HILLS`` file that is empty,
@@ -246,12 +255,17 @@ A value that is larger but not a multiple raises::
 Setting ``Config.n_cores == n_configs_iter`` gives one core per worker and is
 the simplest choice.
 
-The default ``dynamics_timeout`` of 2 hours is very generous for active
-learning, as each step takes ``2 + n_calls**3 + extra_time`` fs, which is
-typically tens to hundreds of femtoseconds. If your trajectories normally
-finish in seconds, it is safe to set ``dynamics_timeout`` to a few minutes
-instead. The ``process_timeout`` should be kept above ``dynamics_timeout``:
-the worker also has to run selection and, for the last frame, a single-point
-QM calculation. For large or difficult-to-converge systems, you might even
-consider increasing this above the default to avoid killing your jobs
-mid-convergence.
+The default ``dynamics_timeout`` of 100,000 hours is effectively infinite for 
+active learning, but this is done temporarily so as to not affect default 
+behaviour for other modes of operation (metadynamics etc.). A suitable 
+dynamics_timeout can be set based on the expected runtime of each step, as each 
+step takes ``2 + n_calls**3 + extra_time`` fs, which is typically tens to 
+hundreds of femtoseconds. A reasonable suggestion for active learning would be 
+to set ``dynamics_timeout`` to around 2 hours.
+
+If your trajectories normally finish in seconds, it is also safe to set 
+``dynamics_timeout`` to a few minutes instead. The ``process_timeout`` should 
+be kept above ``dynamics_timeout``: the worker also has to run selection and, 
+for the last frame, a single-point QM calculation. For large or 
+difficult-to-converge systems, you might consider increasing this above the 
+suggested 2 hour value to avoid killing your jobs mid-convergence.

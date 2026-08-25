@@ -38,8 +38,8 @@ class _ConfigClass:
     """
 
     n_cores = 4 if _NUM_CPUS >= 4 else _NUM_CPUS
-    process_timeout = 60 * 60 * 8  # 8 hours
-    dynamics_timeout = 60 * 60 * 2  # 2 hours
+    process_timeout = 60 * 60 * 100001  # 100001 hours
+    dynamics_timeout = 60 * 60 * 100000  # 100000 hours
     _orca_keywords = None
     _gaussian_keywords = None
 
