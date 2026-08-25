@@ -47,16 +47,12 @@ Two properties of the tree above decide how workers are launched.
 PLUMED, and an active-learning worker may start a QM code, so no level of the
 tree can be a leaf. ``concurrent.futures.ProcessPoolExecutor`` creates
 non-daemonic workers, which are free to do this, and it is what
-``Metadynamics`` uses. ``multiprocessing.Pool`` is not an option here:
-``multiprocessing/pool.py`` sets ``w.daemon = True`` unconditionally, for
-every context, and a daemonic process is not allowed to have children.
+``Metadynamics`` uses. `
 
 **The parent must be able to reclaim an individual worker.**
 ``_add_active_configs`` manages raw ``mp.Process`` objects and an ``mp.Queue``
 directly, so it can poll each worker, notice one that has outrun its timeout,
-and terminate just that one while the rest of the iteration carries on. The
-``AsyncResult.get()`` interface offers no equivalent — it either blocks or it
-does not, with no per-worker handle to act on.
+and terminate just that one while the rest of the iteration carries on.
 
 =================================
 Why the ``spawn`` start method
@@ -73,14 +69,7 @@ so the parent holds an initialised CUDA context. ``spawn`` gives each child a
 clean interpreter that initialises CUDA for itself, which is the only way for
 a child to use the GPU at all.
 
-**Threadpool locks.** MACE runs under OpenMP/MKL threadpools. A ``spawn``ed
-child starts with no inherited lock state, so its behaviour does not depend on
-which locks happened to be held at the moment it was created — the property
-that makes runs reproducible. CPython is moving the same way: 3.12 emits a
-``DeprecationWarning`` when a multi-threaded process is forked, and 3.14
-changes the default start method on Linux to ``forkserver``.
-
-**One code path everywhere.** ``spawn`` is the only start method available on
+**Unification across platforms.** ``spawn`` is the only start method available on
 all supported platforms, so contributors developing on macOS exercise the same
 process semantics that CI and Linux HPC do.
 
@@ -98,7 +87,7 @@ The three timeouts
 
    * - Layer
      - Mechanism
-     - Knob
+     - Adjuster
      - Default
      - Catches
    * - Inner
