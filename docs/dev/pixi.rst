@@ -3,7 +3,9 @@ Using pixi
 ****************
 
 The MACE environment for *mlp-train*  can be managed with `pixi <https://pixi.sh>`_.
-This page is a short primer; see :doc:`installation` for the install steps.
+This page is a short primer; see :doc:`installation` for the install steps. The
+conda route described there remains supported while the transition to pixi is in
+progress -- either one gives you a working MACE environment.
 
 What pixi is
 ============

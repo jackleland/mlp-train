@@ -54,7 +54,7 @@ jobs:
           slug: duartegroup/mlp-train
 
   test-mace:
-    name: MACE (${{ matrix.python-version }}, ${{ matrix.os }})
+    name: MACE pixi (${{ matrix.python-version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
 
     # The pixi lock pins CUDA builds (system-requirements cuda = "12"); this lets
@@ -86,6 +86,44 @@ jobs:
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v7
       with:
-          flags: python-${{ matrix.python-version }}-mace
+          flags: python-${{ matrix.python-version }}-mace-pixi
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: duartegroup/mlp-train
+
+  test-mace-conda:
+    name: MACE conda (${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: true
+      matrix:
+        os: ["ubuntu-22.04"]
+        python-version: ["3.10"]
+
+    defaults:
+      run:
+        shell: bash -l {0}
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: mamba-org/setup-micromamba@v3
+      with:
+        environment-file: environment_mace.yml
+        environment-name: gha-test-env
+        cache-environment: true
+        create-args: >-
+          python=${{ matrix.python-version }}
+
+    - name: MACE install
+      run: ./install_mace.sh
+
+    - name: Test MACE install
+      run: pytest --cov=mlptrain
+
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v7
+      with:
+          flags: python-${{ matrix.python-version }}-mace-conda
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: duartegroup/mlp-train

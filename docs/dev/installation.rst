@@ -8,10 +8,53 @@ Mlp-train can be cloned from https://github.com/duartegroup/mlp-train.
 
      git clone https://github.com/duartegroup/mlp-train.git
 
+MACE can be installed either with ``conda`` or with `pixi <https://pixi.sh>`_.
+The two are alternatives, not steps: pixi is where the project is heading, but
+the conda path is kept working for now.
+
+MACE (conda)
+============
+
+This route requires ``conda`` or ``mamba``. If you do not have it already
+installed, you can download it from
+https://www.anaconda.com/docs/getting-started/miniconda/install#macos-linux-installation.
+
+From the repository root:
+
+.. code-block:: bash
+
+   ./install_mace.sh
+
+MACE benefits from GPU acceleration. To make sure pytorch is installed with CUDA
+support, either install from a machine with GPU access, or override the detected
+CUDA version (typical when installing from a head node without GPUs but intending
+to run on GPUs):
+
+.. code-block:: bash
+
+   CONDA_OVERRIDE_CUDA=12.0 ./install_mace.sh
+
+The packages are installed into a new conda environment called ``mlptrain-mace``.
+To activate it and check that pytorch has CUDA support:
+
+.. code-block:: bash
+
+   conda activate mlptrain-mace
+   conda list | grep pytorch
+
+If everything works correctly, you should see something similar to
+
+.. code-block:: text
+
+   pytorch  2.4.1 cuda118_py39ha48351b_305 conda-forge
+
+If the third column does not contain the word ``cuda``, you need to install the
+environment again.
+
 MACE (pixi)
 ===========
 
-The MACE environment is managed with `pixi <https://pixi.sh>`_. First install pixi:
+The MACE environment can also be managed with `pixi <https://pixi.sh>`_. First install pixi:
 
 .. code-block:: bash
 
