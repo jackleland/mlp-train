@@ -9,8 +9,6 @@ Mlp-train can be cloned from https://github.com/duartegroup/mlp-train.
      git clone https://github.com/duartegroup/mlp-train.git
 
 MACE can be installed either with ``conda`` or with `pixi <https://pixi.sh>`_.
-The two are alternatives, not steps: pixi is where the project is heading, but
-the conda path is kept working for now.
 
 MACE (conda)
 ============
@@ -68,8 +66,9 @@ Then, from the repository root, create the environment (this also installs
    pixi install -e mace
    pixi run -e mace test
 
-The pixi environment targets ``linux-64`` and ships CUDA-enabled builds (matching
-``[system-requirements] cuda = "12"`` in ``pixi.toml``). On a machine without a
+The pixi environment currently supports ``osx-arm44`` and ``linux-64``, either CPU or CUDA-enabled builds (matching
+``[system-requirements] cuda = "12"`` in ``pixi.toml``). CUDA build install also `cuEquivariance <https://docs.nvidia.com/cuda/cuequivariance/>`_.
+To install CUDA version on a machine without a
 GPU (e.g. a head node, or to install CUDA builds for later GPU use), set the CUDA
 override so the locked CUDA packages can be installed:
 
