@@ -7,7 +7,7 @@ active-learning loop starts one worker per requested configuration, each
 worker drives its own molecular dynamics, and that dynamics may in turn
 start further processes (PLUMED, a QM code, or a pool of metadynamics
 walkers). This page describes that structure, the three timeouts that bound
-it, and the constraints it places on contributors.
+it, and what to keep in mind when writing code that runs inside it.
 
 =================
 The process tree
@@ -37,60 +37,56 @@ The process tree
 
 All process creation uses the ``spawn`` start method.
 
-=====================================
-Why not ``multiprocessing.Pool``
-=====================================
+=======================================
+Why ``mp.Process`` and the executor
+=======================================
 
-Both ``_add_active_configs`` and ``Metadynamics`` previously used
-``mp.get_context('spawn').Pool(...)``. Two properties of ``Pool`` made that
-untenable:
+Two properties of the tree above decide how workers are launched.
 
-1. **Pool workers are daemonic.** A daemonic process is not allowed to have
-   children, so any nesting in the tree above is illegal from inside a pool
-   worker. ``concurrent.futures.ProcessPoolExecutor`` creates non-daemonic
-   workers, which is why ``Metadynamics`` now uses it.
+**Workers must be able to have children.** A metadynamics worker starts
+PLUMED, and an active-learning worker may start a QM code, so no level of the
+tree can be a leaf. ``concurrent.futures.ProcessPoolExecutor`` creates
+non-daemonic workers, which are free to do this, and it is what
+``Metadynamics`` uses. ``multiprocessing.Pool`` is not an option here:
+``multiprocessing/pool.py`` sets ``w.daemon = True`` unconditionally, for
+every context, and a daemonic process is not allowed to have children.
 
-2. **There is no way to reclaim a wedged worker.** The collection loop called
-   ``AsyncResult.get(timeout=None)``, so a single non-terminating trajectory
-   blocked the parent indefinitely — the whole active-learning run stalled
-   with no log output and no way to recover short of killing the job.
+**The parent must be able to reclaim an individual worker.**
+``_add_active_configs`` manages raw ``mp.Process`` objects and an ``mp.Queue``
+directly, so it can poll each worker, notice one that has outrun its timeout,
+and terminate just that one while the rest of the iteration carries on. The
+``AsyncResult.get()`` interface offers no equivalent — it either blocks or it
+does not, with no per-worker handle to act on.
 
-``_add_active_configs`` therefore manages raw ``mp.Process`` objects and a
-``mp.Queue`` directly, which gives the parent the ability to poll, time out,
-and kill.
+=================================
+Why the ``spawn`` start method
+=================================
 
-====================================
-Why not the ``fork`` start method
-====================================
+Every child is started with ``spawn``: a fresh interpreter that imports
+``mlptrain`` from scratch and inherits nothing from the parent's memory. That
+matters because by the time workers are created the parent is holding state
+that does not survive being copied.
 
-Switching from ``spawn`` to ``fork`` is a recurring suggestion, usually on the
-grounds that ``spawn``'s pickling requirement is inconvenient and that
-mlp-train targets Linux HPC anyway. It does not help, and it breaks things.
+**A live CUDA context.** ``al_train`` calls ``mlp.train()`` before entering
+the iteration loop, and the MACE backend calls ``torch.cuda.empty_cache()``,
+so the parent holds an initialised CUDA context. ``spawn`` gives each child a
+clean interpreter that initialises CUDA for itself, which is the only way for
+a child to use the GPU at all.
 
-**It does not lift the daemonic restriction.** Daemonic-ness is a property of
-``Pool``, not of the start method: ``multiprocessing/pool.py`` sets
-``w.daemon = True`` unconditionally, for every context.
-``concurrent.futures.process`` never sets it at all. A forked ``Pool`` worker
-is just as unable to have children as a spawned one — the move to
-``mp.Process`` and ``ProcessPoolExecutor`` was the actual fix, and it is
-required regardless of start method.
+**Threadpool locks.** MACE runs under OpenMP/MKL threadpools. A ``spawn``ed
+child starts with no inherited lock state, so its behaviour does not depend on
+which locks happened to be held at the moment it was created — the property
+that makes runs reproducible. CPython is moving the same way: 3.12 emits a
+``DeprecationWarning`` when a multi-threaded process is forked, and 3.14
+changes the default start method on Linux to ``forkserver``.
 
-**It breaks CUDA.** ``al_train`` calls ``mlp.train()`` in the parent before
-entering the iteration loop, so by the time workers are created the parent
-holds a live CUDA context (the MACE backend calls
-``torch.cuda.empty_cache()``). A forked child inherits that context in an
-unusable state and raises ``Cannot re-initialize CUDA in forked subprocess``.
-This is a Linux problem, not a macOS one.
+**One code path everywhere.** ``spawn`` is the only start method available on
+all supported platforms, so contributors developing on macOS exercise the same
+process semantics that CI and Linux HPC do.
 
-**It breaks threaded libraries.** ``fork`` copies only the calling thread but
-all of the process's locks, in whatever state they happened to be in. A parent
-running MACE under OpenMP/MKL threadpools therefore produces children that
-deadlock intermittently and unreproducibly. CPython 3.12 emits a
-``DeprecationWarning`` for forking a multi-threaded process, and 3.14 changes
-the Linux default start method to ``forkserver``.
-
-(``fork`` combined with matplotlib also fails on macOS, but that is the least
-of the reasons.)
+The cost is that everything crossing a process boundary has to be picklable,
+and that ``Config`` is rebuilt from the import in each child. Both are made
+concrete in `Writing code that runs in a worker`_.
 
 =====================
 The three timeouts
@@ -121,21 +117,22 @@ The three timeouts
      - —
      - The poll loop itself failing to make progress
 
-The inner timeout is **best effort**. ``SIGALRM`` is delivered to the main
-thread of a process, but it can be masked or swallowed entirely by
-C-extension code — PLUMED and PyTorch both do this in places. When that
-happens the alarm never fires and the trajectory runs to completion. The
-per-worker hard kill exists precisely because the inner timeout cannot be
-relied on alone; do not remove one on the grounds that the other covers it.
+The inner timeout is the graceful layer. ``SIGALRM`` is delivered to the main
+thread, ``run_with_timeout`` raises, and ``run_mlp_md`` unwinds through its
+normal ``finally`` blocks. C-extension code — PLUMED and PyTorch both do this
+in places — can hold a signal until it returns to the interpreter, so a
+trajectory deep inside such a call may run past ``dynamics_timeout``. When it
+does, the per-worker timeout is the layer that still delivers the bound: the
+parent terminates the worker and the iteration moves on.
 
-Why both layers are needed
---------------------------
+What each layer covers
+----------------------
 
-The inner timeout is not a faster version of the outer one, and the two are
-not interchangeable. Two reasons.
+The two layers bound different things, and the inner one covers considerably
+more of the codebase.
 
-**Only active learning has a parent watching.** ``run_mlp_md`` is called from
-five places, and the poll loop covers exactly one of them:
+**The parent poll loop is specific to active learning.** ``run_mlp_md`` is
+called from five places, and the poll loop supervises one of them:
 
 .. list-table::
    :header-rows: 1
@@ -154,27 +151,30 @@ five places, and the poll loop covers exactly one of them:
    * - ``TauCalculator._calculate_single``
      - Inner timeout only — no worker process at all
 
-Deleting the inner timeout would re-open the original hang for metadynamics,
-umbrella sampling, width estimation and τ_acc. Those four sites have no
-parent-side kill; closing that gap is unfinished work.
+Metadynamics, umbrella sampling, width estimation and τ_acc are therefore
+bounded by ``Config.dynamics_timeout`` alone: they run with no supervising
+parent, so the inner timeout is what keeps them finite.
 
 **A timeout returns, a kill does not.** When the inner timeout fires,
 ``run_mlp_md`` unwinds normally: ``work_in_tmp_dir``'s ``finally`` block still
 copies ``kept_substrings`` (``.traj``, ``.dat``) back out of the temporary
-directory, and ``PlumedCalculator.finalize()`` still runs. A ``SIGKILL`` from
-the parent loses both — the temp directory is orphaned, ``keep_al_trajs``
-produces nothing for that worker, and the ``HILLS`` file it was writing never
-arrives for bias inheritance. The per-worker kill is the backstop for when the
-graceful path fails, not the preferred path.
+directory, and ``PlumedCalculator.finalize()`` still runs, so the partial
+trajectory and the ``HILLS`` file written so far survive. A ``SIGKILL`` from
+the parent trades those for a guaranteed bound — the temporary directory is
+orphaned, ``keep_al_trajs`` produces nothing for that worker, and no ``HILLS``
+file arrives for bias inheritance.
 
-.. warning::
+.. note::
 
-   Setting ``Config.process_timeout = None`` does **not** disable killing. It
-   disables the per-worker check, but the poll loop still force-kills every
-   remaining worker once its hard cap is reached, which falls back to
-   ``7200 + 120`` seconds when no timeout is configured.
+   The poll loop always terminates. Setting ``Config.process_timeout = None``
+   turns off the per-worker check, and the loop's own cap —
+   ``process_timeout + 120 s``, or ``7200 + 120`` seconds when no per-worker
+   timeout is configured — still bounds the iteration and kills whatever is
+   left running.
 
-Both knobs are plain attributes on the ``Config`` singleton::
+Both knobs are plain attributes on the ``Config`` singleton, set at module
+scope so that spawned workers pick them up (see `Writing code that runs in a
+worker`_)::
 
     import mlptrain as mlt
 
@@ -195,17 +195,17 @@ Workers never return values; they put a four-tuple on a shared
 inside one worker is reported to the parent rather than lost across the
 process boundary.
 
-The parent drains the queue **inside** the poll loop, on every iteration —
-not only after all workers have exited. This is not an optimisation. A
-``mp.Queue`` is backed by an OS pipe with a finite buffer; a child that has
-written more than the buffer holds blocks in its feeder thread until the
-parent reads, and a child blocked that way never exits. Joining before
-draining is the classic multiprocessing queue/join deadlock. If you add
-anything to the poll loop, keep the drain unconditional.
+The parent drains the queue **inside** the poll loop, on every iteration, so
+that a child is always able to finish writing and exit. An ``mp.Queue`` is
+backed by an OS pipe with a finite buffer: a child that has written more than
+the buffer holds blocks in its feeder thread until the parent reads. Draining
+on every pass keeps that buffer moving, and keeps the parent clear of the
+classic queue/join deadlock. If you add anything to the poll loop, keep the
+drain unconditional.
 
-===============================
-Constraints for contributors
-===============================
+========================================
+Writing code that runs in a worker
+========================================
 
 **Everything crossing a process boundary must be picklable under spawn.**
 There is no shared memory and no inherited state: the child re-imports
@@ -213,22 +213,30 @@ There is no shared memory and no inherited state: the child re-imports
 ``init_config.copy()``, ``mlp.copy()`` and ``selection_method.copy()``, and
 why backends must keep their calculators constructible from picklable state.
 
-**Config does not propagate.** ``Config`` is a module-level mutable singleton,
-so each spawned child gets a freshly imported copy with the defaults.
-Mutating ``Config`` in the parent after workers have started has no effect on
-them; anything a worker needs must be passed through its arguments.
+**Set ``Config`` attributes at module scope.** ``Config`` is a module-level
+singleton, and each spawned worker builds its own by re-importing — including
+re-importing the script it was launched from. Assignments written at module
+scope therefore take effect in the worker; assignments inside an
+``if __name__ == '__main__':`` block, or made after the workers have started,
+apply only to the parent. Anything else a worker needs is passed explicitly
+through its arguments.
 
-**Failures degrade, they do not raise.** A worker that times out, crashes, or
-whose trajectory is abandoned contributes ``None``. The iteration continues
-with fewer configurations and logs how many were lost. Functions along this
-path return ``Optional`` for that reason — ``run_mlp_md``,
-``_run_mlp_md``, ``Metadynamics._run_single_metad`` and
-``_gen_active_config`` all may return ``None``, and callers must check.
+**A lost worker costs configurations, not the iteration.** A worker whose
+trajectory hit ``dynamics_timeout``, that was terminated at
+``process_timeout``, or that raised and reported through the
+``(idx, 'error', …)`` tuple, contributes ``None`` to the pool of results. The
+iteration continues with the configurations that did arrive and logs how many
+trajectories were lost. Functions along this path return ``Optional`` for that
+reason — ``run_mlp_md``, ``_run_mlp_md``, ``Metadynamics._run_single_metad``
+and ``_gen_active_config`` all may return ``None``, and callers must check.
 
-**Corrupt PLUMED output may appear.** A trajectory that
+**Bias inheritance tolerates incomplete PLUMED output.** A trajectory that
 diverges before being killed can leave a ``HILLS`` file that is empty,
-truncated mid-line, or contains ``NaN`` gaussians. The
-missing and empty files are skipped and not included, and the average is computed without them. Files with invalid lines are still used, but the invalid lines are discarded. If ``plumed sum_hills`` fails, the inherited bias drops to zero, rather than aborting the iteration.
+truncated mid-line, or contains ``NaN`` gaussians. Missing and empty files are
+skipped and not included, and the average is computed without them. Files with
+invalid lines are still used, but the invalid lines are discarded. If
+``plumed sum_hills`` fails, the inherited bias drops to zero, rather than
+aborting the iteration.
 
 ==================
 Tuning guidance
@@ -239,14 +247,22 @@ Tuning guidance
     n_processes = min(n_configs, Config.n_cores)
     n_cores_pp  = max(Config.n_cores // n_configs, 1)
 
-``Config.n_cores`` must be a multiple of ``n_configs_iter`` when it exceeds
-it, otherwise ``_add_active_configs`` raises. Choosing
-``Config.n_cores == n_configs_iter`` gives one core per worker and the
-simplest behaviour.
+So that every worker is given the same number of cores, ``Config.n_cores``
+must be an exact multiple of ``n_configs_iter`` whenever it is larger than it.
+A value that is larger but not a multiple raises::
+
+    NotImplementedError: Active learning is only implemented using an
+    multiple of the number n_configs_iter. Please use n*<n_configs> cores.
+
+Setting ``Config.n_cores == n_configs_iter`` gives one core per worker and is
+the simplest choice.
 
 The default ``dynamics_timeout`` of 2 hours is very generous for active
-learning, as each step takes ``2 + n_calls**3 + extra_time`` fs, which is typically
-tens to hundreds of femtoseconds. If your trajectories normally finish in
-seconds, it is safe to set '' dynamics_timeout `` to a few minutes instead. The ``process_timeout``
-should be kept above ``dynamics_timeout``: the worker also has to run selection
-and, for the last frame, a single-point QM calculation. For large or difficult-to-converge systems, you might even consider increasing this above the default to avoid killing your jobs mid-convergence.  
+learning, as each step takes ``2 + n_calls**3 + extra_time`` fs, which is
+typically tens to hundreds of femtoseconds. If your trajectories normally
+finish in seconds, it is safe to set ``dynamics_timeout`` to a few minutes
+instead. The ``process_timeout`` should be kept above ``dynamics_timeout``:
+the worker also has to run selection and, for the last frame, a single-point
+QM calculation. For large or difficult-to-converge systems, you might even
+consider increasing this above the default to avoid killing your jobs
+mid-convergence.
