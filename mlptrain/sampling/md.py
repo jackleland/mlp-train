@@ -24,10 +24,9 @@ from mlptrain.utils import work_in_tmp_dir
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.io.trajectory import Trajectory as ASETrajectory
 from ase.md.nptberendsen import NPTBerendsen
-from ase.md.langevin import Langevin
-from ase.md.verlet import VelocityVerlet
-from ase.io import read
+from ase.md import Langevin, VelocityVerlet
 from ase import units as ase_units
+import time
 
 if TYPE_CHECKING:
     from mlptrain.potentials import MLPotential
@@ -164,6 +163,8 @@ def run_mlp_md(
     else:
         logger.info('Running MLP MD')
 
+    start_time = time.perf_counter()
+
     decorator = work_in_tmp_dir(
         copied_substrings=copied_substrings_list,
         kept_substrings=kept_substrings_list,
@@ -186,6 +187,17 @@ def run_mlp_md(
         restart_files=restart_files,
         **kwargs,
     )
+
+    delta_time = time.perf_counter() - start_time
+    if delta_time < 60:
+        logger.info(f'MLP MD simulation completed in {delta_time:02.2f} s.')
+    else:
+        hours, remainder = divmod(delta_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        logger.info(
+            f'MLP MD simulation completed in {hours:02d} h {minutes:02d} min {seconds:02d} s.'
+        )
 
     return traj
 
@@ -378,7 +390,7 @@ def _run_dynamics(
 ) -> None:
     """Initialise dynamics object and run dynamics"""
 
-    if all([value is not None for value in [pressure, compress]]) and temp > 0:
+    if pressure is not None and compress is not None and temp > 0:
         # Run NPT dynamics if pressure and compressibility are specified
         pressure_au = pressure * ase_units.bar
         compress_au = compress / ase_units.bar
@@ -542,8 +554,8 @@ def _attach_plumed_coordinates(
 def _set_momenta_and_geometry(
     ase_atoms: 'ase.atoms.Atoms',
     temp: float,
-    bbond_energy: dict,
-    fbond_energy: dict,
+    bbond_energy: dict | None,
+    fbond_energy: dict | None,
     restart: bool,
     traj_name: str,
 ) -> None:
@@ -604,7 +616,12 @@ def _set_momenta_and_geometry(
             'last configuration'
         )
 
-        last_configuration = read(traj_name)
+        last_configuration = ase.io.read(traj_name)
+
+        # Make sure we've only read a single structure, not multiple of them!
+        assert isinstance(
+            last_configuration, ase.Atoms
+        ), 'more than one configuration in file {traj_name}!'
 
         ase_atoms.set_positions(last_configuration.get_positions())
         ase_atoms.set_momenta(last_configuration.get_momenta())
